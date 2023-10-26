@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use syn::{
     parse_macro_input, DeriveInput, Data, DataStruct, Fields,
-    Ident, parse_quote,
+    Ident,
 };
 use quote::quote;
 use proc_macro2::Span;
@@ -13,7 +13,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // We then gather what we need from the struct
     let struct_ident = &input.ident;
-    let mut fields = if let Data::Struct(DataStruct {
+    let fields = if let Data::Struct(DataStruct {
         fields: Fields::Named(fields),
         ..
     }) = input.data {
@@ -28,15 +28,24 @@ pub fn derive(input: TokenStream) -> TokenStream {
         Span::call_site()
     );
     let mut field_idents = Vec::new();
-    for field in fields.iter_mut() {
-        let old_type = &field.ty;
-        field.ty = parse_quote! { Option<#old_type> };
+    let mut field_types = Vec::new();
+    for field in fields.iter() {
         field_idents.push(field.ident.clone().expect("Struct is named"));
+        field_types.push(field.ty.clone());
     };
 
     let expanded = quote! {
         pub struct #builder_ident {
-            #fields
+            #(#field_idents: Option<#field_types>),*
+        }
+
+        impl #builder_ident {
+            #(
+                fn #field_idents(&mut self, #field_idents: #field_types) -> &mut Self {
+                    self.#field_idents = Some(#field_idents);
+                    self
+                }
+            )*
         }
 
         impl #struct_ident {
