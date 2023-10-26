@@ -35,6 +35,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        use std::error::Error;
+
         pub struct #builder_ident {
             #(#field_idents: Option<#field_types>),*
         }
@@ -46,6 +48,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             )*
+
+            pub fn build(&mut self) -> Result<#struct_ident, Box<dyn Error>> {
+                if #(self.#field_idents.is_none())||* {
+                    return Err("All fields should be set".into());
+                }
+
+                Ok(#struct_ident {
+                    #(#field_idents: self.#field_idents.clone().expect("Field existence was checked")),*
+                })
+            }
         }
 
         impl #struct_ident {
