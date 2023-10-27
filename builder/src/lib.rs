@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use syn::{
     parse_macro_input, DeriveInput, Data, DataStruct, Fields,
     Ident, Type, parse_quote, PathArguments, GenericArgument,
-    Error,
+    Error, Attribute, Meta, MetaNameValue, Expr, Lit,
 };
 use quote::{quote, format_ident};
 
@@ -10,9 +10,14 @@ struct ParsedField {
     pub ident: Ident,
     pub ty: Type,
     pub is_optional: bool,
+    /// Only if it's a vec
+    /// You get it with #[builder(each = "<any ident>")]
+    pub individual_item_setter: Option<Ident>,
+    pub individual_item_type: Option<Type>,
+    pub is_vector: bool,
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     // We first parse the input as the input of a derive macro
     let input = parse_macro_input!(input as DeriveInput);
@@ -26,36 +31,70 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // We build the new struct
     let parsed_fields: Vec<_> = fields.iter()
         .map(|field| {
-            let (is_optional, ty) = match_against_option(&field.ty);
+            let inner_type = match_against_type(parse_quote!(Option), &field.ty);
+            let is_optional = inner_type.is_some();
+            // These types should be paired together
+            let individual_item_setter = check_builder_attribute(&field.attrs);
+            let individual_item_type = match_against_type(parse_quote!(Vec), &field.ty);
+            let is_vector = individual_item_type.is_some();
             ParsedField {
                 ident: field.ident.clone().unwrap(),
-                ty,
+                ty: if let Some(inner_type) = inner_type { inner_type } else { field.ty.clone() },
                 is_optional,
+                is_vector,
+                individual_item_setter,
+                individual_item_type,
             }
         })
         .collect();
     let field_idents: Vec<&Ident> = parsed_fields.iter().map(|field| &field.ident).collect();
-    let field_types: Vec<&Type> = parsed_fields.iter().map(|field| &field.ty).collect();
 
-    let builder_ident = format_ident!("{}Builder", struct_ident);
-    let builder_struct = quote! {
-        pub struct #builder_ident {
-            #(#field_idents: Option<#field_types>),*
-        }
-    };
+    let builder_ident = format_ident!("{struct_ident}Builder");
+
+    let individual_item_setter_methods = parsed_fields.iter()
+        .filter(|field| field.individual_item_setter.is_some())
+        .map(|field| {
+            let ParsedField {
+                individual_item_setter,
+                individual_item_type,
+                ident,
+                ..
+            } = field;
+            // Need to get the type inside `Vec<>`
+            quote! {
+                pub fn #individual_item_setter(&mut self, item: #individual_item_type) -> &mut Self {
+                    self.#ident.push(item);
+                    self
+                }
+            }
+        });
+    let whole_item_setter_methods = parsed_fields.iter()
+        .filter(|field| {
+            if let Some(setter) = &field.individual_item_setter {
+                return !field_idents.contains(&setter);
+            }
+
+            true
+        })
+        .map(|field| {
+            let ParsedField { ident, ty, is_vector, .. } = field;
+            let value = if *is_vector { quote! { #ident } } else { quote! { Some(#ident) } };
+            quote! {
+                pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident = #value;
+                    self
+                }
+            }
+        });
 
     let setter_methods = quote! {
-        #(
-            fn #field_idents(&mut self, #field_idents: #field_types) -> &mut Self {
-                self.#field_idents = Some(#field_idents);
-                self
-            }
-        )*
+        #( #individual_item_setter_methods )*
+        #( #whole_item_setter_methods )*
     };
 
     let required_idents: Vec<&Ident> = parsed_fields
         .iter()
-        .filter(|field| !field.is_optional)
+        .filter(|field| !field.is_optional && !field.is_vector)
         .map(|field| &field.ident)
         .collect();
     let optional_idents: Vec<&Ident> = parsed_fields
@@ -63,15 +102,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .filter(|field| field.is_optional)
         .map(|field| &field.ident)
         .collect();
+    let vector_idents: Vec<&Ident> = parsed_fields
+        .iter()
+        .filter(|field| field.is_vector)
+        .map(|field| &field.ident)
+        .collect();
     let build_method = quote! {
         pub fn build(&mut self) -> Result<#struct_ident, Box<dyn std::error::Error>> {
             if #(self.#required_idents.is_none())||* {
-                return Err("All non-optional fields should be set".into());
+                return Err("All required fields should be set".into());
             }
 
             Ok(#struct_ident {
-                #( #required_idents: self.#required_idents.clone().unwrap() ),*,
-                #( #optional_idents: self.#optional_idents.clone() ),*
+                #( #required_idents: self.#required_idents.clone().unwrap(), )*
+                #( #optional_idents: self.#optional_idents.clone(), )*
+                #( #vector_idents: self.#vector_idents.clone(), )*
             })
         }
     };
@@ -87,9 +132,30 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #struct_ident {
             pub fn builder() -> #builder_ident {
                 #builder_ident {
-                    #(#field_idents: None),*
+                    #( #required_idents: None, )*
+                    #( #optional_idents: None, )*
+                    #( #vector_idents: std::vec::Vec::new(), )*
                 }
             }
+        }
+    };
+
+    let builder_fields = parsed_fields.iter().map(|field| {
+        let ParsedField { ident, ty, is_vector, .. } = field;
+
+        if *is_vector {
+            quote! {
+                #ident: #ty,
+            }
+        } else {
+            quote! {
+                #ident: Option<#ty>,
+            }
+        }
+    });
+    let builder_struct = quote! {
+        pub struct #builder_ident {
+            #( #builder_fields )*
         }
     };
 
@@ -102,30 +168,56 @@ pub fn derive(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// Returns `true` if the passed type is an `Option` and if it is, it returns
-/// the inner type.
-fn match_against_option(ty: &Type) -> (bool, Type) {
-    let option_ident: Ident = parse_quote!(Option);
+/// Matches against a particular type with one generic and gets the inner type,
+/// works for both `Option` and `Vec`
+fn match_against_type(ident_to_match: Ident, ty: &Type) -> Option<Type> {
     match ty {
         Type::Path(type_path) => {
             for segment in type_path.path.segments.iter() {
-                if segment.ident == option_ident {
-                    let inner_type = match &segment.arguments {
-                        PathArguments::AngleBracketed(arguments) => {
-                            match arguments.args.first()
-                                .expect("Option's have one generic argument") {
-                                GenericArgument::Type(the_actual_type) => the_actual_type,
-                                _ => panic!("Option's generic should be a type"),
-                            }
-                        },
-                        _ => panic!("Option's have generics"),
-                    };
-                    return (true, inner_type.clone());
+                if segment.ident != ident_to_match {
+                    return None;
+                }
+
+                let inner_type = match &segment.arguments {
+                    PathArguments::AngleBracketed(arguments) => {
+                        match arguments.args.first()
+                            .expect("Should have one generic argument") {
+                            GenericArgument::Type(the_actual_type) => the_actual_type.clone(),
+                            _ => panic!("Generic should be a type"),
+                        }
+                    },
+                    _ => panic!("Should have generics"),
                 };
+
+                return Some(inner_type)
             };
 
-            (false, ty.clone())
+            None
         },
         _ => panic!("Expected a path"),
+    }
+}
+
+/// Return the name of the setter for individual items of the Vec in case
+/// the attribute `builder(each = "<any ident>")` was used
+fn check_builder_attribute(attributes: &[Attribute]) -> Option<Ident> {
+    let builder = attributes.first()?.clone();
+    match builder.meta {
+        Meta::List(list) => {
+            let pair: MetaNameValue = syn::parse2(list.tokens.into()).ok()?;
+            let ident_to_match: Ident = parse_quote!(each);
+            if *pair.path.get_ident().unwrap() != ident_to_match {
+                panic!("Wrong attribute!");
+            }
+            let value: Ident = match pair.value {
+                Expr::Lit(inner) => match inner.lit {
+                    Lit::Str(literal_string) => format_ident!("{}", literal_string.value()),
+                    _ => panic!("Wrong attribute!"),
+                },
+                _ => panic!("Wrong attribute!"),
+            };
+            Some(value)
+        },
+        _ => panic!("Wrong attribute!"),
     }
 }
