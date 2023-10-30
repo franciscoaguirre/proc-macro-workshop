@@ -29,24 +29,28 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     // We build the new struct
-    let parsed_fields: Vec<_> = fields.iter()
+    let parsed_fields: Result<Vec<_>, Error> = fields.iter()
         .map(|field| {
             let inner_type = match_against_type(parse_quote!(Option), &field.ty);
             let is_optional = inner_type.is_some();
             // These types should be paired together
-            let individual_item_setter = check_builder_attribute(&field.attrs);
+            let individual_item_setter = check_builder_attribute(&field.attrs)?;
             let individual_item_type = match_against_type(parse_quote!(Vec), &field.ty);
             let is_vector = individual_item_type.is_some();
-            ParsedField {
+            Ok(ParsedField {
                 ident: field.ident.clone().unwrap(),
                 ty: if let Some(inner_type) = inner_type { inner_type } else { field.ty.clone() },
                 is_optional,
                 is_vector,
                 individual_item_setter,
                 individual_item_type,
-            }
+            })
         })
         .collect();
+    let parsed_fields = match parsed_fields {
+        Ok(inner) => inner,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let field_idents: Vec<&Ident> = parsed_fields.iter().map(|field| &field.ident).collect();
 
     let builder_ident = format_ident!("{struct_ident}Builder");
@@ -200,24 +204,30 @@ fn match_against_type(ident_to_match: Ident, ty: &Type) -> Option<Type> {
 
 /// Return the name of the setter for individual items of the Vec in case
 /// the attribute `builder(each = "<any ident>")` was used
-fn check_builder_attribute(attributes: &[Attribute]) -> Option<Ident> {
-    let builder = attributes.first()?.clone();
+/// A success means we either found the attribute and it was well formatted
+/// or we didn't find the attribute, since it's optional.
+/// A failure means we found the attribute but it had a bad format.
+fn check_builder_attribute(attributes: &[Attribute]) -> Result<Option<Ident>, Error> {
+    let builder = match attributes.first() {
+        Some(builder) => builder.clone(),
+        None => return Ok(None), // It's fine to not have this attribute
+    };
     match builder.meta {
-        Meta::List(list) => {
-            let pair: MetaNameValue = syn::parse2(list.tokens.into()).ok()?;
+        Meta::List(ref list) => {
+            let pair: MetaNameValue = syn::parse2(list.tokens.clone().into())?;
             let ident_to_match: Ident = parse_quote!(each);
             if *pair.path.get_ident().unwrap() != ident_to_match {
-                panic!("Wrong attribute!");
+                return Err(Error::new_spanned(&builder.meta, "expected `builder(each = \"...\")`"));
             }
             let value: Ident = match pair.value {
-                Expr::Lit(inner) => match inner.lit {
+                Expr::Lit(ref inner) => match &inner.lit {
                     Lit::Str(literal_string) => format_ident!("{}", literal_string.value()),
-                    _ => panic!("Wrong attribute!"),
+                    _ => return Err(Error::new_spanned(&pair, "expected `builder(each = \"...\")`")),
                 },
-                _ => panic!("Wrong attribute!"),
+                _ => return Err(Error::new_spanned(&pair, "expected `builder(each = \"...\")`")),
             };
-            Some(value)
+            Ok(Some(value))
         },
-        _ => panic!("Wrong attribute!"),
+        _ => return Err(Error::new_spanned(&builder.meta, "expected `builder(each = \"...\")`")),
     }
 }
