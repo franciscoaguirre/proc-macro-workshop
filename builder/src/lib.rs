@@ -112,7 +112,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .map(|field| &field.ident)
         .collect();
     let build_method = quote! {
-        pub fn build(&mut self) -> Result<#struct_ident, Box<dyn std::error::Error>> {
+        pub fn build(&mut self) -> std::result::Result<#struct_ident, std::boxed::Box<dyn std::error::Error>> {
             if #(self.#required_idents.is_none())||* {
                 return Err("All required fields should be set".into());
             }
@@ -153,7 +153,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         } else {
             quote! {
-                #ident: Option<#ty>,
+                #ident: std::option::Option<#ty>,
             }
         }
     });
