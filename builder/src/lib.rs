@@ -1,10 +1,9 @@
 use proc_macro::TokenStream;
+use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, DeriveInput, Data, DataStruct, Fields,
-    Ident, Type, parse_quote, PathArguments, GenericArgument,
-    Error, Attribute, Meta, MetaNameValue, Expr, Lit,
+    parse_macro_input, parse_quote, Attribute, Data, DataStruct, DeriveInput, Error, Expr, Fields,
+    GenericArgument, Ident, Lit, Meta, MetaNameValue, PathArguments, Type,
 };
-use quote::{quote, format_ident};
 
 struct ParsedField {
     pub ident: Ident,
@@ -24,12 +23,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let struct_ident = &input.ident;
 
     let fields = match &input.data {
-        Data::Struct(DataStruct { fields: Fields::Named(fields), .. }) => &fields.named,
-        _ => return Error::new_spanned(&input, "Expected a named struct").to_compile_error().into(),
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => &fields.named,
+        _ => {
+            return Error::new_spanned(&input, "Expected a named struct")
+                .to_compile_error()
+                .into()
+        }
     };
 
     // We build the new struct
-    let parsed_fields: Result<Vec<_>, Error> = fields.iter()
+    let parsed_fields: Result<Vec<_>, Error> = fields
+        .iter()
         .map(|field| {
             let inner_type = match_against_type(parse_quote!(Option), &field.ty);
             let is_optional = inner_type.is_some();
@@ -39,7 +46,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             let is_vector = individual_item_type.is_some();
             Ok(ParsedField {
                 ident: field.ident.clone().unwrap(),
-                ty: if let Some(inner_type) = inner_type { inner_type } else { field.ty.clone() },
+                ty: if let Some(inner_type) = inner_type {
+                    inner_type
+                } else {
+                    field.ty.clone()
+                },
                 is_optional,
                 is_vector,
                 individual_item_setter,
@@ -72,7 +83,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
         });
-    let whole_item_setter_methods = parsed_fields.iter()
+    let whole_item_setter_methods = parsed_fields
+        .iter()
         .filter(|field| {
             if let Some(setter) = &field.individual_item_setter {
                 return !field_idents.contains(&setter);
@@ -81,8 +93,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
             true
         })
         .map(|field| {
-            let ParsedField { ident, ty, is_vector, .. } = field;
-            let value = if *is_vector { quote! { #ident } } else { quote! { Some(#ident) } };
+            let ParsedField {
+                ident,
+                ty,
+                is_vector,
+                ..
+            } = field;
+            let value = if *is_vector {
+                quote! { #ident }
+            } else {
+                quote! { Some(#ident) }
+            };
             quote! {
                 pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
                     self.#ident = #value;
@@ -145,7 +166,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     let builder_fields = parsed_fields.iter().map(|field| {
-        let ParsedField { ident, ty, is_vector, .. } = field;
+        let ParsedField {
+            ident,
+            ty,
+            is_vector,
+            ..
+        } = field;
 
         if *is_vector {
             quote! {
@@ -184,20 +210,23 @@ fn match_against_type(ident_to_match: Ident, ty: &Type) -> Option<Type> {
 
                 let inner_type = match &segment.arguments {
                     PathArguments::AngleBracketed(arguments) => {
-                        match arguments.args.first()
-                            .expect("Should have one generic argument") {
+                        match arguments
+                            .args
+                            .first()
+                            .expect("Should have one generic argument")
+                        {
                             GenericArgument::Type(the_actual_type) => the_actual_type.clone(),
                             _ => panic!("Generic should be a type"),
                         }
-                    },
+                    }
                     _ => panic!("Should have generics"),
                 };
 
-                return Some(inner_type)
-            };
+                return Some(inner_type);
+            }
 
             None
-        },
+        }
         _ => panic!("Expected a path"),
     }
 }
@@ -217,17 +246,35 @@ fn check_builder_attribute(attributes: &[Attribute]) -> Result<Option<Ident>, Er
             let pair: MetaNameValue = syn::parse2(list.tokens.clone().into())?;
             let ident_to_match: Ident = parse_quote!(each);
             if *pair.path.get_ident().unwrap() != ident_to_match {
-                return Err(Error::new_spanned(&builder.meta, "expected `builder(each = \"...\")`"));
+                return Err(Error::new_spanned(
+                    &builder.meta,
+                    "expected `builder(each = \"...\")`",
+                ));
             }
             let value: Ident = match pair.value {
                 Expr::Lit(ref inner) => match &inner.lit {
                     Lit::Str(literal_string) => format_ident!("{}", literal_string.value()),
-                    _ => return Err(Error::new_spanned(&pair, "expected `builder(each = \"...\")`")),
+                    _ => {
+                        return Err(Error::new_spanned(
+                            &pair,
+                            "expected `builder(each = \"...\")`",
+                        ))
+                    }
                 },
-                _ => return Err(Error::new_spanned(&pair, "expected `builder(each = \"...\")`")),
+                _ => {
+                    return Err(Error::new_spanned(
+                        &pair,
+                        "expected `builder(each = \"...\")`",
+                    ))
+                }
             };
             Ok(Some(value))
-        },
-        _ => return Err(Error::new_spanned(&builder.meta, "expected `builder(each = \"...\")`")),
+        }
+        _ => {
+            return Err(Error::new_spanned(
+                &builder.meta,
+                "expected `builder(each = \"...\")`",
+            ))
+        }
     }
 }
